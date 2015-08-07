@@ -1,65 +1,96 @@
+#include <boost/foreach.hpp>
 #include <pluginlib/class_list_macros.h>
 #include <ros/ros.h>
-#include <std_msgs/Bool.h>
-#include <std_msgs/Empty.h>
+#include <rosbag/view.h>
 
-#include "nodelet_rosbag/nodelet_rosbag.h"
+#include <nodelet_rosbag/nodelet_rosbag.h>
+#include <nodelet_rosbag/SubscribeAction.h>
+#include <nodelet_rosbag/StartAction.h>
+#include <nodelet_rosbag/StopAction.h>
+#include <nodelet_rosbag/RecordAction.h>
 
-PLUGINLIB_EXPORT_CLASS(nodelet_rosbag::NodeletRosbag, nodelet::Nodelet);
 
 namespace nodelet_rosbag
 {
-  void NodeletRosbag::onInit() 
-  {
-    NODELET_DEBUG("Initializing nodelet...");
-    ros::NodeHandle& private_nh = getPrivateNodeHandle();
-    private_nh.getParam("rosbag_path", rosbag_path_);
-    private_nh.getParam("rosbag_topic", rosbag_topic_);
-    private_nh.getParam("rosbag_record_topic", rosbag_record_topic_);
-    private_nh.getParam("rosbag_start_topic", rosbag_start_topic_);
-    private_nh.getParam("rosbag_stop_topic", rosbag_stop_topic_);
-    private_nh.getParam("rosbag_playback_topic", rosbag_playback_topic_);
-    start_sub_ = private_nh.subscribe(rosbag_start_topic_, 10, &NodeletRosbag::start_callback, this);
-    stop_sub_ = private_nh.subscribe(rosbag_stop_topic_, 10, &NodeletRosbag::stop_callback, this);
-  }
-
-  void NodeletRosbag::start_callback(const std_msgs::Empty::ConstPtr & start) {
-    boost::mutex::scoped_lock(rosbag_mode_);
-    ros::NodeHandle& private_nh = getPrivateNodeHandle();
+  void NodeRosbagImpl::start_callback() {
+    boost::mutex::scoped_lock(rosbag_mode_mtx_);
     if (recording_) {
-      record_sub_ = private_nh.subscribe(rosbag_record_topic_, 10, &NodeletRosbag::record_callback, this);
+      for(int i = 0; i < rosbag_record_topics_.size(); ++i) {
+        ros::Subscriber subscriber = private_nh_.subscribe(
+          rosbag_record_topics_[i], 10, &NodeRosbagImpl::record_callback, this);
+        record_subscribers_.push_back(subscriber);
+      }
     } else {
-      // TODO(esteve): read from rosbag and publish messages
+      rosbag::View view;
+      ros::Time start_time = view.getBeginTime();
+      ros::Time end_time = ros::TIME_MAX;
+      rosbag::TopicQuery topic_query(rosbag_record_topics_);
+      view.addQuery(bag_, topic_query, start_time, end_time);
+
+      BOOST_FOREACH(rosbag::MessageInstance const m, view) {
+        if(recording_) {
+          break;
+        }
+
+        std::map<std::string, ros::Publisher>::iterator it = playback_publishers_.find(m.getTopic());
+        if(it == playback_publishers_.end()) {
+          ros::AdvertiseOptions advertise_opts(
+            m.getTopic(), 10, m.getMD5Sum(), m.getDataType(),
+            m.getMessageDefinition());
+
+          ros::Publisher publisher = private_nh_.advertise(advertise_opts);
+
+          playback_publishers_.insert(
+            playback_publishers_.begin(),
+            std::pair<std::string, ros::Publisher>(m.getTopic(), publisher));
+        }
+
+        topic_tools::ShapeShifter::ConstPtr s = m.instantiate<topic_tools::ShapeShifter>();
+        playback_publishers_[m.getTopic()].publish(s);
+      }
     }
   }
 
-  void NodeletRosbag::stop_callback(const std_msgs::Empty::ConstPtr & start) {
-    boost::mutex::scoped_lock(rosbag_mode_);
+  void NodeRosbagImpl::stop_callback() {
+    boost::mutex::scoped_lock(rosbag_mode_mtx_);
     if (recording_) {
-      record_sub_.shutdown();
+      for(int i = 0; i < rosbag_record_topics_.size(); ++i) {
+        private_nh_.shutdown();
+      }
     } else {
-      // TODO(esteve): stop publishing messages from rosbag
+      std::map<std::string, ros::Publisher>::iterator it;
+      for(
+        it = playback_publishers_.begin();
+        it != playback_publishers_.end();
+        ++it) {
+        std::pair<std::string, ros::Publisher> pair = *it;
+        pair.second.shutdown();
+      }
     }
+    bag_.close();
   }
 
-  void NodeletRosbag::mode_callback(const std_msgs::Bool::ConstPtr & recording)
+  void NodeRosbagImpl::mode_callback()
   {
-    boost::mutex::scoped_lock(rosbag_mode_);
-    ros::NodeHandle& private_nh = getPrivateNodeHandle();
-    recording_ = recording->data;
+    boost::mutex::scoped_lock(rosbag_mode_mtx_);
+    recording_ = !recording_;
+    // TODO(esteve): add error recovery
+    bag_.close();
     if (recording_) {
-      // TODO(esteve): add error recovery
-      bag_.close();
       bag_.open(rosbag_path_, rosbag::bagmode::Write);
     } else {
-      bag_.close();
-      record_sub_.shutdown();
+      for(int i = 0; i < rosbag_record_topics_.size(); ++i) {
+        private_nh_.shutdown();
+      }
       bag_.open(rosbag_path_, rosbag::bagmode::Read);
     }
   }
 
-  void NodeletRosbag::record_callback(const topic_tools::ShapeShifter::ConstPtr & event)
+  void NodeRosbagImpl::record_callback(const ros::MessageEvent<topic_tools::ShapeShifter const> & event)
   {
-    bag_.write(rosbag_topic_, ros::Time::now(), event);
+    boost::mutex::scoped_lock(rosbag_bag_mtx_);
+    ros::M_string& header = event.getConnectionHeader();
+    topic_tools::ShapeShifter::ConstPtr message = event.getMessage();
+    bag_.write(header["topic"], ros::Time::now(), message);
   }
 }
