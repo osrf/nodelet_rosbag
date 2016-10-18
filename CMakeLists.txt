@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 2.8.3)
 project(nodelet_rosbag)
 
-find_package(catkin REQUIRED COMPONENTS nodelet rosbag_storage roscpp std_msgs actionlib_msgs topic_tools)
+find_package(catkin REQUIRED COMPONENTS nodelet rosbag_storage roscpp std_msgs actionlib actionlib_msgs topic_tools)
 
 find_package(Boost REQUIRED COMPONENTS thread)
 
@@ -30,7 +30,7 @@ add_library(nodelet_rosbag src/nodelet_rosbag.cpp)
 
 target_link_libraries(nodelet_rosbag ${catkin_LIBRARIES})
 
-add_dependencies(nodelet_rosbag ${catkin_EXPORTED_TARGETS})
+add_dependencies(nodelet_rosbag ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 
 install(TARGETS nodelet_rosbag
   ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
